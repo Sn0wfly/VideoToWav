@@ -10,7 +10,7 @@ from pathlib import Path
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
                             QLabel, QTreeWidget, QTreeWidgetItem, QProgressBar, QTextEdit, 
                             QPushButton, QCheckBox, QTabWidget, QFileDialog, QMessageBox,
-                            QGroupBox, QGridLayout, QSplitter)
+                            QGroupBox, QGridLayout, QSplitter, QComboBox, QButtonGroup, QSlider)
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QSize
 from PyQt5.QtGui import QIcon, QTextCursor, QFont
 
@@ -23,7 +23,7 @@ class FFmpegWorker(QThread):
     log_message = pyqtSignal(str)  # Mensaje de registro
     
     def __init__(self, input_path, output_path, selected_folders, selected_formats, 
-                 recursive, overwrite_existing):
+                 recursive, overwrite_existing, output_format, audio_quality):
         super().__init__()
         self.input_path = input_path
         self.output_path = output_path
@@ -31,6 +31,8 @@ class FFmpegWorker(QThread):
         self.selected_formats = selected_formats
         self.recursive = recursive
         self.overwrite_existing = overwrite_existing
+        self.output_format = output_format
+        self.audio_quality = audio_quality
         self.stop_requested = False
     
     def run(self):
@@ -46,6 +48,7 @@ class FFmpegWorker(QThread):
             return
         
         self.log_message.emit(f"✅ Se encontraron {len(video_files)} archivos de video.")
+        self.log_message.emit(f"Formato de salida: {self.output_format}")
         
         # Contadores
         successful = 0
@@ -61,24 +64,26 @@ class FFmpegWorker(QThread):
                 break
                 
             # Determinar la ruta de salida
+            output_extension = self.get_output_extension()
+            
             if not self.output_path:
                 # Si no se especificó carpeta de salida, usar la misma que el archivo original
-                output_file = video_file.with_suffix('.wav')
+                output_file = video_file.with_suffix(output_extension)
             else:
                 # Calcular ruta de salida preservando la estructura de carpetas
                 rel_path = video_file.relative_to(self.input_path) if video_file.is_relative_to(self.input_path) else Path(video_file.name)
-                output_file = Path(self.output_path) / rel_path.with_suffix('.wav')
+                output_file = Path(self.output_path) / rel_path.with_suffix(output_extension)
                 
                 # Crear directorio de salida si no existe
                 os.makedirs(output_file.parent, exist_ok=True)
             
-            # Verificar si el archivo WAV ya existe
+            # Verificar si el archivo de salida ya existe
             if output_file.exists() and not self.overwrite_existing:
                 self.log_message.emit(f"⏭️ Omitido: {video_file.name} (Ya existe)")
                 skipped += 1
             else:
                 self.log_message.emit(f"🔄 Convirtiendo: {video_file.name}")
-                success = self.convert_to_wav(str(video_file), str(output_file))
+                success = self.convert_audio(str(video_file), str(output_file))
                 
                 if success:
                     self.log_message.emit(f"✅ Convertido: {video_file.name}")
@@ -103,6 +108,146 @@ class FFmpegWorker(QThread):
         # Emitir señal de finalización
         self.conversion_finished.emit()
     
+    def get_output_extension(self):
+        """Obtiene la extensión de archivo según el formato de salida seleccionado."""
+        # Mapeo de formatos a extensiones
+        format_extensions = {
+            'wav': '.wav',
+            'mp3': '.mp3',
+            'ogg': '.ogg',
+            'flac': '.flac',
+            'aac': '.aac',
+            'm4a': '.m4a',
+            'opus': '.opus',
+            'wma': '.wma'
+        }
+        return format_extensions.get(self.output_format, '.wav')
+    
+    def convert_audio(self, input_file, output_file):
+        """Convierte un archivo de video a audio con el formato especificado."""
+        try:
+            # Configuración base
+            command = ['ffmpeg', '-i', input_file, '-vn']
+            
+            # Configurar el codec y parámetros según el formato seleccionado
+            if self.output_format == 'wav':
+                # WAV - PCM 16 bit optimizado para Whisper
+                command.extend(['-acodec', 'pcm_s16le', '-ar', '16000', '-ac', '1'])
+            elif self.output_format == 'mp3':
+                # MP3 con calidad variable
+                quality = self.get_mp3_quality()
+                command.extend(['-codec:a', 'libmp3lame', '-qscale:a', quality])
+            elif self.output_format == 'ogg':
+                # OGG Vorbis con calidad variable
+                quality = self.get_ogg_quality()
+                command.extend(['-codec:a', 'libvorbis', '-qscale:a', quality])
+            elif self.output_format == 'flac':
+                # FLAC con compresión variable
+                command.extend(['-codec:a', 'flac', '-compression_level', str(self.audio_quality)])
+            elif self.output_format == 'aac':
+                # AAC con bitrate variable
+                bitrate = self.get_aac_bitrate()
+                command.extend(['-codec:a', 'aac', '-b:a', bitrate])
+            elif self.output_format == 'm4a':
+                # M4A (AAC en contenedor MP4)
+                bitrate = self.get_aac_bitrate()
+                command.extend(['-codec:a', 'aac', '-b:a', bitrate])
+            elif self.output_format == 'opus':
+                # Opus con bitrate variable
+                bitrate = self.get_opus_bitrate()
+                command.extend(['-codec:a', 'libopus', '-b:a', bitrate])
+            elif self.output_format == 'wma':
+                # WMA con bitrate variable
+                bitrate = self.get_wma_bitrate()
+                command.extend(['-codec:a', 'wmav2', '-b:a', bitrate])
+            else:
+                # Formato desconocido, usar WAV como fallback
+                command.extend(['-acodec', 'pcm_s16le', '-ar', '16000', '-ac', '1'])
+            
+            # Agregar el archivo de salida y parámetros adicionales
+            command.extend([
+                output_file,
+                '-y' if self.overwrite_existing else '-n',
+                '-hide_banner', '-loglevel', 'warning'
+            ])
+            
+            # Ejecutar ffmpeg
+            result = subprocess.run(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                universal_newlines=True
+            )
+            
+            if result.returncode != 0:
+                self.log_message.emit(f"❌ Error al convertir {input_file}: {result.stderr}")
+                return False
+            
+            return True
+        except Exception as e:
+            self.log_message.emit(f"❌ Error al convertir {input_file}: {str(e)}")
+            return False
+    
+    def get_mp3_quality(self):
+        """Obtiene el valor de calidad para MP3 según el nivel seleccionado."""
+        # MP3 quality: 0 (mejor) a 9 (peor)
+        quality_map = {
+            0: '0',  # Mejor calidad
+            1: '2',
+            2: '4',
+            3: '6',
+            4: '9'   # Calidad más baja
+        }
+        return quality_map.get(self.audio_quality, '2')
+    
+    def get_ogg_quality(self):
+        """Obtiene el valor de calidad para OGG Vorbis según el nivel seleccionado."""
+        # OGG quality: 0 (peor) a 10 (mejor)
+        quality_map = {
+            0: '10',  # Mejor calidad
+            1: '8',
+            2: '6',
+            3: '3',
+            4: '1'    # Calidad más baja
+        }
+        return quality_map.get(self.audio_quality, '6')
+    
+    def get_aac_bitrate(self):
+        """Obtiene el bitrate para AAC según el nivel seleccionado."""
+        # AAC bitrates
+        bitrate_map = {
+            0: '256k',  # Mejor calidad
+            1: '192k',
+            2: '128k',
+            3: '96k',
+            4: '64k'    # Calidad más baja
+        }
+        return bitrate_map.get(self.audio_quality, '128k')
+    
+    def get_opus_bitrate(self):
+        """Obtiene el bitrate para Opus según el nivel seleccionado."""
+        # Opus bitrates
+        bitrate_map = {
+            0: '192k',  # Mejor calidad
+            1: '128k',
+            2: '96k',
+            3: '64k',
+            4: '32k'    # Calidad más baja
+        }
+        return bitrate_map.get(self.audio_quality, '96k')
+    
+    def get_wma_bitrate(self):
+        """Obtiene el bitrate para WMA según el nivel seleccionado."""
+        # WMA bitrates
+        bitrate_map = {
+            0: '256k',  # Mejor calidad
+            1: '192k',
+            2: '128k',
+            3: '96k',
+            4: '64k'    # Calidad más baja
+        }
+        return bitrate_map.get(self.audio_quality, '128k')
+
     def stop(self):
         """Detiene la ejecución del hilo"""
         self.stop_requested = True
@@ -137,28 +282,6 @@ class FFmpegWorker(QThread):
                             video_files.append(file_path)
         
         return [Path(file) for file in video_files]
-    
-    def convert_to_wav(self, input_file, output_file):
-        """Convierte un archivo de video a WAV optimizado para Whisper."""
-        try:
-            result = subprocess.run(
-                ['ffmpeg', '-i', input_file, '-vn', '-acodec', 'pcm_s16le', 
-                 '-ar', '16000', '-ac', '1', output_file, 
-                 '-y' if self.overwrite_existing else '-n',
-                 '-hide_banner', '-loglevel', 'warning'],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                universal_newlines=True
-            )
-            
-            if result.returncode != 0:
-                self.log_message.emit(f"❌ Error al convertir {input_file}: {result.stderr}")
-                return False
-            
-            return True
-        except Exception as e:
-            self.log_message.emit(f"❌ Error al convertir {input_file}: {str(e)}")
-            return False
 
 
 class FolderScannerThread(QThread):
@@ -219,12 +342,12 @@ class FolderScannerThread(QThread):
 
 
 class MP4ToWAVConverterApp(QMainWindow):
-    """Aplicación principal para convertir archivos de video a WAV"""
+    """Aplicación principal para convertir archivos de video a audio"""
     def __init__(self):
         super().__init__()
         
         # Configuración de la ventana principal
-        self.setWindowTitle("Convertidor de Video a WAV")
+        self.setWindowTitle("Convertidor de Video a Audio")
         self.setMinimumSize(900, 700)
         
         # Variables de estado
@@ -239,6 +362,18 @@ class MP4ToWAVConverterApp(QMainWindow):
             '.webm', '.mpg', '.mpeg', '.m2v', '.mp2', '.m2p', '.mpe', 
             '.3gp', '.3g2', '.mxf', '.rm', '.rmvb', '.asf', '.vob', '.divx',
             '.y4m', '.ogv', '.ogg', '.drc', '.gifv', '.mts', '.m2ts', '.f4v'
+        ]
+        
+        # Formatos de audio de salida disponibles
+        self.audio_formats = [
+            {'id': 'wav', 'name': 'WAV (PCM) - Sin compresión'},
+            {'id': 'mp3', 'name': 'MP3 - Compresión popular'},
+            {'id': 'ogg', 'name': 'OGG Vorbis - Formato libre'},
+            {'id': 'flac', 'name': 'FLAC - Sin pérdida'},
+            {'id': 'aac', 'name': 'AAC - Alta calidad'},
+            {'id': 'm4a', 'name': 'M4A - Formato Apple'},
+            {'id': 'opus', 'name': 'Opus - Alta compresión'},
+            {'id': 'wma', 'name': 'WMA - Windows Media Audio'}
         ]
         
         # Variables para los checkboxes de formatos
@@ -279,10 +414,15 @@ class MP4ToWAVConverterApp(QMainWindow):
         folders_tab = QWidget()
         self.tab_widget.addTab(folders_tab, "Selección de Carpetas")
         
+        # Pestaña de configuración de audio
+        audio_tab = QWidget()
+        self.tab_widget.addTab(audio_tab, "Configuración de Audio")
+        
         # Configurar cada pestaña
         self.setup_main_tab(main_tab)
         self.setup_filters_tab(filters_tab)
         self.setup_folders_tab(folders_tab)
+        self.setup_audio_tab(audio_tab)
     
     def setup_main_tab(self, tab):
         """Configura la pestaña principal"""
@@ -328,6 +468,15 @@ class MP4ToWAVConverterApp(QMainWindow):
         
         self.overwrite_checkbox = QCheckBox("Sobrescribir archivos existentes")
         options_layout.addWidget(self.overwrite_checkbox)
+        
+        # Formato de salida seleccionado (vista rápida)
+        format_layout = QHBoxLayout()
+        format_layout.addWidget(QLabel("Formato de salida:"))
+        self.output_format_combo = QComboBox()
+        for fmt in self.audio_formats:
+            self.output_format_combo.addItem(fmt['name'], fmt['id'])
+        format_layout.addWidget(self.output_format_combo)
+        options_layout.addLayout(format_layout)
         
         # Botón de escaneo
         scan_btn = QPushButton("Escanear Archivos")
@@ -432,6 +581,84 @@ class MP4ToWAVConverterApp(QMainWindow):
         deselect_all_btn = QPushButton("Deseleccionar Todas")
         deselect_all_btn.clicked.connect(self.deselect_all_folders)
         buttons_layout.addWidget(deselect_all_btn)
+    
+    def setup_audio_tab(self, tab):
+        """Configura la pestaña de configuración de audio"""
+        layout = QVBoxLayout(tab)
+        
+        # Grupo de formato de salida
+        format_group = QGroupBox("Formato de Audio de Salida")
+        layout.addWidget(format_group)
+        
+        format_layout = QVBoxLayout(format_group)
+        
+        # Descripción
+        format_layout.addWidget(QLabel("Seleccione el formato de audio que desea generar:"))
+        
+        # Lista de formatos con RadioButtons
+        self.format_radio_group = QButtonGroup(self)
+        
+        for i, fmt in enumerate(self.audio_formats):
+            radio = QRadioButton(fmt['name'])
+            if i == 0:  # Seleccionar WAV por defecto
+                radio.setChecked(True)
+            self.format_radio_group.addButton(radio, i)
+            format_layout.addWidget(radio)
+        
+        # Conectar cambio de radio button a actualización del combobox en la pestaña principal
+        self.format_radio_group.buttonClicked.connect(self.on_audio_format_changed)
+        
+        # Grupo de calidad de audio
+        quality_group = QGroupBox("Calidad de Audio")
+        layout.addWidget(quality_group)
+        
+        quality_layout = QVBoxLayout(quality_group)
+        
+        quality_layout.addWidget(QLabel("Seleccione el nivel de calidad:"))
+        
+        # Slider para calidad
+        self.quality_slider = QSlider(Qt.Horizontal)
+        self.quality_slider.setMinimum(0)
+        self.quality_slider.setMaximum(4)
+        self.quality_slider.setValue(2)  # Valor medio por defecto
+        self.quality_slider.setTickPosition(QSlider.TicksBelow)
+        self.quality_slider.setTickInterval(1)
+        quality_layout.addWidget(self.quality_slider)
+        
+        # Etiquetas para el slider
+        slider_labels_layout = QHBoxLayout()
+        slider_labels_layout.addWidget(QLabel("Mejor calidad\n(archivo más grande)"), 1)
+        slider_labels_layout.addStretch(3)
+        slider_labels_layout.addWidget(QLabel("Menor calidad\n(archivo más pequeño)"), 1)
+        quality_layout.addLayout(slider_labels_layout)
+        
+        # Información sobre formatos
+        info_group = QGroupBox("Información sobre Formatos")
+        layout.addWidget(info_group)
+        
+        info_layout = QVBoxLayout(info_group)
+        
+        info_text = QLabel(
+            "<b>WAV:</b> Sin compresión, calidad perfecta, archivos grandes. Ideal para edición.<br>"
+            "<b>MP3:</b> Compresión con pérdida, compatible con prácticamente todo.<br>"
+            "<b>OGG:</b> Formato libre, mejor calidad que MP3 a mismo tamaño.<br>"
+            "<b>FLAC:</b> Compresión sin pérdida, calidad perfecta, archivo más pequeño que WAV.<br>"
+            "<b>AAC:</b> Mejor calidad que MP3 a mismo bitrate. Usado en iTunes.<br>"
+            "<b>M4A:</b> Contenedor para AAC, usado en ecosistema Apple.<br>"
+            "<b>Opus:</b> Formato más nuevo, excelente calidad a bitrates bajos.<br>"
+            "<b>WMA:</b> Formato de Microsoft, buena compatibilidad en Windows."
+        )
+        info_text.setTextFormat(Qt.RichText)
+        info_text.setWordWrap(True)
+        info_layout.addWidget(info_text)
+        
+        # Espaciador
+        layout.addStretch()
+    
+    def on_audio_format_changed(self, button):
+        """Actualiza el combobox cuando cambia el formato en la pestaña de audio"""
+        index = self.format_radio_group.id(button)
+        self.output_format_combo.setCurrentIndex(index)
     
     def browse_input_folder(self):
         """Abre un diálogo para seleccionar la carpeta de entrada"""
@@ -664,6 +891,12 @@ class MP4ToWAVConverterApp(QMainWindow):
         # Obtener carpetas seleccionadas
         selected_folders = self.get_selected_folders()
         
+        # Obtener formato de audio seleccionado
+        output_format = self.output_format_combo.currentData()
+        
+        # Obtener nivel de calidad
+        audio_quality = self.quality_slider.value()
+        
         # Cambiar estado de la interfaz
         self.conversion_running = True
         self.start_button.setEnabled(False)
@@ -679,7 +912,9 @@ class MP4ToWAVConverterApp(QMainWindow):
             selected_folders, 
             selected_formats, 
             self.recursive_checkbox.isChecked(), 
-            self.overwrite_checkbox.isChecked()
+            self.overwrite_checkbox.isChecked(),
+            output_format,
+            audio_quality
         )
         
         # Conectar señales

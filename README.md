@@ -1,68 +1,79 @@
-# MP4 a WAV Conversor
+# VidToWav
 
-Una aplicación gráfica para convertir archivos de video a audio en diversos formatos, optimizados para transcripción o uso general.
+Aplicación para convertir archivos de video a varios formatos de audio usando FFmpeg.
+
+![Captura de pantalla](screenshots/screenshot.png)
 
 ## Características
 
-- Interfaz gráfica moderna e intuitiva
-- Disponible en dos versiones: Tkinter (básica) y PyQt5 (avanzada)
-- Soporta múltiples formatos de video (mp4, mov, avi, mkv, m4v, wmv, flv, ts, etc.)
-- **Múltiples formatos de salida**: WAV, MP3, OGG, FLAC, AAC, M4A, OPUS y WMA
-- Control de calidad de audio para cada formato
-- Preserva la estructura de carpetas al procesar subcarpetas
-- Multithreading para mantener la GUI responsive durante las conversiones
-- Barra de progreso y registro detallado de operaciones
+- **Interfaz gráfica moderna** con Qt5 que permite una operación intuitiva
+- **Conversión a múltiples formatos de audio**:
+  - WAV (PCM, calidad CD)
+  - WAV para transcripción de voz (optimizado para IA)
+  - MP3
+  - OGG Vorbis
+  - FLAC
+  - AAC
+  - M4A
+  - Opus
+  - WMA
+- **Control de calidad** para formatos comprimidos
+- **Explorador de archivos** con soporte para selección de carpetas y archivos individuales
+- **Soporte para múltiples formatos de video** (más de 30 formatos)
+- **Conversión recursiva** de subcarpetas
+- **Preservación de estructura** de carpetas en los archivos de salida
+- **Interfaz con pestañas** para una organización clara de las opciones
+- **Multithreading** para mantener la interfaz responsiva durante la conversión
+- **Registro detallado** del proceso de conversión
 
 ## Requisitos
 
-- Python 3.6 o superior
-- ffmpeg instalado y disponible en el PATH del sistema
-- Para la versión PyQt5: biblioteca PyQt5 (`pip install PyQt5`)
+- Python 3.6+
+- PyQt5
+- FFmpeg (accesible desde el PATH)
 
-## Versiones disponibles
+## Instalación
 
-### 1. Versión Tkinter (mp4towav_gui.py)
-
-Versión ligera que usa la biblioteca tkinter incluida con Python:
-
+1. Clona o descarga este repositorio:
 ```
-python mp4towav_gui.py
+git clone https://github.com/Sn0wfly/VideoToWav.git
 ```
 
-### 2. Versión PyQt5 (mp4towav_qt.py) - Recomendada
-
-Versión mejorada con una interfaz más profesional, mejor manejo de checkboxes y selección de carpetas, y soporte para múltiples formatos de audio:
-
+2. Instala las dependencias:
 ```
-python mp4towav_qt.py
+pip install PyQt5
 ```
+
+3. Asegúrate de tener FFmpeg instalado y en el PATH:
+   - **Windows**: [Descarga FFmpeg](https://ffmpeg.org/download.html) y añade la carpeta bin al PATH
+   - **Mac**: `brew install ffmpeg`
+   - **Linux**: `sudo apt install ffmpeg` o equivalente en tu distribución
 
 ## Uso
 
-1. Ejecute la versión deseada del script Python
-2. Seleccione la carpeta de entrada que contiene sus videos
-3. (Opcional) Seleccione la carpeta de salida donde se guardarán los archivos de audio
-4. Configure las opciones (buscar subcarpetas, sobrescribir existentes)
-5. Seleccione el formato de salida deseado y la calidad (versión PyQt5)
-6. Use las pestañas para filtrar formatos específicos o seleccionar carpetas particulares
-7. Haga clic en "Escanear Archivos" para ver qué archivos serán procesados
-8. Haga clic en "Iniciar Conversión"
+Ejecuta el programa con:
+```
+python vidtowav.py
+```
 
-## Formatos de Audio Soportados (Versión PyQt5)
+### Pasos básicos:
 
-- **WAV** - Sin compresión, calidad perfecta (optimizado para Whisper)
-- **MP3** - Compresión con pérdida, compatible universalmente
-- **OGG** - Formato libre, mejor calidad que MP3 a mismo tamaño
-- **FLAC** - Compresión sin pérdida, calidad perfecta, archivo más pequeño que WAV
-- **AAC** - Mejor calidad que MP3 a mismo bitrate
-- **M4A** - Contenedor para AAC, usado en ecosistema Apple
-- **OPUS** - Formato más nuevo, excelente calidad a bitrates bajos
-- **WMA** - Formato de Microsoft, buena compatibilidad en Windows
+1. Selecciona una carpeta de entrada que contenga videos
+2. Elige el formato de audio de salida deseado
+3. Ajusta opciones como calidad, recursividad, etc.
+4. Selecciona los archivos o carpetas específicos que quieres convertir
+5. Haz clic en "Iniciar Conversión"
 
-## Opciones
+## Estructura de carpetas
 
-- **Buscar en subcarpetas**: Busca videos en todas las subcarpetas del directorio seleccionado
-- **Sobrescribir archivos existentes**: Reemplaza archivos de audio que ya existen
-- **Filtros de formato**: Seleccione qué formatos de video desea convertir
-- **Selección de carpetas**: Elija qué carpetas específicas desea procesar
-- **Nivel de calidad**: Ajuste la calidad del audio resultante (tamaño vs. calidad) 
+- `vidtowav.py` - Aplicación principal
+- `screenshots/` - Capturas de pantalla del programa
+
+## Licencia
+
+Este proyecto está bajo la Licencia MIT - ver el archivo [LICENSE](LICENSE) para más detalles.
+
+## Agradecimientos
+
+- [FFmpeg](https://ffmpeg.org/) - El potente framework multimedia utilizado para las conversiones
+- [PyQt5](https://www.riverbankcomputing.com/software/pyqt/) - Framework GUI 

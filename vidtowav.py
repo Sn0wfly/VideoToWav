@@ -10,7 +10,8 @@ from pathlib import Path
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
                             QLabel, QTreeWidget, QTreeWidgetItem, QProgressBar, QTextEdit, 
                             QPushButton, QCheckBox, QTabWidget, QFileDialog, QMessageBox,
-                            QGroupBox, QGridLayout, QSplitter, QComboBox, QButtonGroup, QSlider)
+                            QGroupBox, QGridLayout, QSplitter, QComboBox, QButtonGroup, QSlider,
+                            QRadioButton, QStyle)
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QSize
 from PyQt5.QtGui import QIcon, QTextCursor, QFont
 
@@ -22,12 +23,12 @@ class FFmpegWorker(QThread):
     conversion_finished = pyqtSignal()  # Conversión terminada
     log_message = pyqtSignal(str)  # Mensaje de registro
     
-    def __init__(self, input_path, output_path, selected_folders, selected_formats, 
+    def __init__(self, input_path, output_path, selected_items, selected_formats, 
                  recursive, overwrite_existing, output_format, audio_quality):
         super().__init__()
         self.input_path = input_path
         self.output_path = output_path
-        self.selected_folders = selected_folders
+        self.selected_items = selected_items
         self.selected_formats = selected_formats
         self.recursive = recursive
         self.overwrite_existing = overwrite_existing
@@ -113,6 +114,7 @@ class FFmpegWorker(QThread):
         # Mapeo de formatos a extensiones
         format_extensions = {
             'wav': '.wav',
+            'wav_voice': '.wav',
             'mp3': '.mp3',
             'ogg': '.ogg',
             'flac': '.flac',
@@ -131,7 +133,10 @@ class FFmpegWorker(QThread):
             
             # Configurar el codec y parámetros según el formato seleccionado
             if self.output_format == 'wav':
-                # WAV - PCM 16 bit optimizado para Whisper
+                # WAV - PCM 16 bit con calidad completa (siempre estéreo)
+                command.extend(['-acodec', 'pcm_s16le', '-ar', '44100', '-ac', '2'])
+            elif self.output_format == 'wav_voice':
+                # WAV para transcripción de voz (siempre 16kHz mono)
                 command.extend(['-acodec', 'pcm_s16le', '-ar', '16000', '-ac', '1'])
             elif self.output_format == 'mp3':
                 # MP3 con calidad variable
@@ -162,7 +167,7 @@ class FFmpegWorker(QThread):
                 command.extend(['-codec:a', 'wmav2', '-b:a', bitrate])
             else:
                 # Formato desconocido, usar WAV como fallback
-                command.extend(['-acodec', 'pcm_s16le', '-ar', '16000', '-ac', '1'])
+                command.extend(['-acodec', 'pcm_s16le', '-ar', '44100', '-ac', '2'])
             
             # Agregar el archivo de salida y parámetros adicionales
             command.extend([
@@ -253,14 +258,17 @@ class FFmpegWorker(QThread):
         self.stop_requested = True
 
     def find_video_files(self):
-        """Encuentra archivos de video según los filtros seleccionados."""
+        """Encuentra archivos de video según los filtros y selecciones"""
         video_files = []
+        selected_folders = self.selected_items['folders']
+        selected_files = self.selected_items['files']
         
-        # Si no hay carpetas seleccionadas, usar solo la carpeta base
-        folders_to_search = self.selected_folders if self.selected_folders else [self.input_path]
+        # Primero añadir los archivos individuales seleccionados
+        for file_path in selected_files:
+            video_files.append(Path(file_path))
         
-        # Buscar en cada carpeta seleccionada
-        for folder in folders_to_search:
+        # Luego procesar las carpetas seleccionadas
+        for folder in selected_folders:
             # Verificar si la carpeta existe
             if not os.path.exists(folder):
                 continue
@@ -269,19 +277,28 @@ class FFmpegWorker(QThread):
             if self.recursive:
                 for root, _, files in os.walk(folder):
                     for file in files:
+                        file_path = os.path.join(root, file)
+                        # Verificar si el archivo ya fue añadido como selección individual
+                        if file_path in selected_files:
+                            continue
+                            
                         ext = os.path.splitext(file)[1].lower()
                         if ext in self.selected_formats:
-                            video_files.append(os.path.join(root, file))
+                            video_files.append(Path(file_path))
             # Si la búsqueda no es recursiva, solo buscar en la carpeta actual
             else:
                 for file in os.listdir(folder):
                     file_path = os.path.join(folder, file)
+                    # Verificar si el archivo ya fue añadido como selección individual
+                    if file_path in selected_files:
+                        continue
+                        
                     if os.path.isfile(file_path):
                         ext = os.path.splitext(file)[1].lower()
                         if ext in self.selected_formats:
-                            video_files.append(file_path)
+                            video_files.append(Path(file_path))
         
-        return [Path(file) for file in video_files]
+        return video_files
 
 
 class FolderScannerThread(QThread):
@@ -341,8 +358,8 @@ class FolderScannerThread(QThread):
             self.log_message.emit(f"Error durante el escaneo: {str(e)}")
 
 
-class MP4ToWAVConverterApp(QMainWindow):
-    """Aplicación principal para convertir archivos de video a audio"""
+class VidToWav(QMainWindow):
+    """Aplicación para convertir archivos de video a audio con PyQt5"""
     def __init__(self):
         super().__init__()
         
@@ -367,6 +384,7 @@ class MP4ToWAVConverterApp(QMainWindow):
         # Formatos de audio de salida disponibles
         self.audio_formats = [
             {'id': 'wav', 'name': 'WAV (PCM) - Sin compresión'},
+            {'id': 'wav_voice', 'name': 'WAV para transcripción de voz (16kHz mono)'},
             {'id': 'mp3', 'name': 'MP3 - Compresión popular'},
             {'id': 'ogg', 'name': 'OGG Vorbis - Formato libre'},
             {'id': 'flac', 'name': 'FLAC - Sin pérdida'},
@@ -381,6 +399,7 @@ class MP4ToWAVConverterApp(QMainWindow):
         
         # Variables para el árbol de carpetas
         self.folder_items = {}  # Para acceder rápidamente a los elementos del árbol
+        self.file_items = {}  # Para almacenar referencias a los items de archivo
         
         # Configuración de la interfaz
         self.setup_ui()
@@ -390,83 +409,143 @@ class MP4ToWAVConverterApp(QMainWindow):
         self.check_ffmpeg()
     
     def setup_ui(self):
-        """Configura la interfaz gráfica de usuario"""
+        """Configura la interfaz de usuario"""
         # Widget central
-        central_widget = QWidget()
+        central_widget = QWidget(self)
         self.setCentralWidget(central_widget)
         
         # Layout principal
         main_layout = QVBoxLayout(central_widget)
         
-        # Crear pestañas
+        # Tab Widget
         self.tab_widget = QTabWidget()
         main_layout.addWidget(self.tab_widget)
         
-        # Pestaña principal
-        main_tab = QWidget()
-        self.tab_widget.addTab(main_tab, "Principal")
+        # Pestaña de Conversión
+        conversion_tab = QWidget()
+        self.tab_widget.addTab(conversion_tab, "Conversión")
         
-        # Pestaña de filtros
-        filters_tab = QWidget()
-        self.tab_widget.addTab(filters_tab, "Filtros de Formato")
+        # Pestaña de Formatos
+        formats_tab = QWidget()
+        self.tab_widget.addTab(formats_tab, "Formatos")
         
-        # Pestaña de carpetas
-        folders_tab = QWidget()
-        self.tab_widget.addTab(folders_tab, "Selección de Carpetas")
-        
-        # Pestaña de configuración de audio
+        # Pestaña de Configuración de Audio
         audio_tab = QWidget()
         self.tab_widget.addTab(audio_tab, "Configuración de Audio")
         
-        # Configurar cada pestaña
-        self.setup_main_tab(main_tab)
-        self.setup_filters_tab(filters_tab)
-        self.setup_folders_tab(folders_tab)
+        # Configurar pestaña de conversión
+        self.setup_conversion_tab(conversion_tab)
+        
+        # Configurar pestaña de formatos
+        self.setup_formats_tab(formats_tab)
+        
+        # Configurar pestaña de audio
         self.setup_audio_tab(audio_tab)
+        
+        # Conectar el cambio del combobox para actualizar los radio buttons
+        self.output_format_combo.currentIndexChanged.connect(self.on_output_format_changed)
+        
+        # Status bar
+        self.statusBar().showMessage("Listo")
+        
+        # Comprobar si FFMPEG está disponible
+        if not self.check_ffmpeg():
+            self.log_message("⚠️ ADVERTENCIA: ffmpeg no encontrado en el PATH. La conversión no funcionará.")
     
-    def setup_main_tab(self, tab):
-        """Configura la pestaña principal"""
+    def setup_conversion_tab(self, tab):
+        """Configura la pestaña de conversión"""
         layout = QVBoxLayout(tab)
         
-        # Grupo de selección de carpetas
-        folder_group = QGroupBox("Selección de Carpetas")
-        layout.addWidget(folder_group)
+        # Splitter para dividir la interfaz
+        splitter = QSplitter(Qt.Horizontal)
+        layout.addWidget(splitter)
+        
+        # Panel izquierdo: árbol de carpetas
+        left_panel = QWidget()
+        left_layout = QVBoxLayout(left_panel)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        
+        # Grupo de árbol de carpetas
+        tree_group = QGroupBox("Estructura de carpetas y archivos")
+        left_layout.addWidget(tree_group)
+        
+        tree_layout = QVBoxLayout(tree_group)
+        
+        # Árbol de carpetas
+        self.folder_tree = QTreeWidget()
+        self.folder_tree.setHeaderLabels(["Nombre"])
+        self.folder_tree.setColumnWidth(0, 300)
+        self.folder_tree.itemChanged.connect(self.on_tree_item_changed)
+        tree_layout.addWidget(self.folder_tree)
+        
+        # Botones para seleccionar/deseleccionar
+        buttons_layout = QHBoxLayout()
+        tree_layout.addLayout(buttons_layout)
+        
+        select_all_btn = QPushButton("Seleccionar Todo")
+        select_all_btn.clicked.connect(self.select_all_items)
+        buttons_layout.addWidget(select_all_btn)
+        
+        deselect_all_btn = QPushButton("Deseleccionar Todo")
+        deselect_all_btn.clicked.connect(self.deselect_all_items)
+        buttons_layout.addWidget(deselect_all_btn)
+        
+        # Panel derecho: opciones de conversión
+        right_panel = QWidget()
+        right_layout = QVBoxLayout(right_panel)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        
+        # Carpetas de entrada/salida
+        folder_group = QGroupBox("Carpetas")
+        right_layout.addWidget(folder_group)
         
         folder_layout = QGridLayout(folder_group)
         
         # Carpeta de entrada
-        folder_layout.addWidget(QLabel("Carpeta de Entrada:"), 0, 0)
-        self.input_folder_label = QLabel("")
-        self.input_folder_label.setStyleSheet("background-color: white; padding: 5px; border: 1px solid #ccc;")
+        folder_layout.addWidget(QLabel("Carpeta de entrada:"), 0, 0)
+        self.input_folder_label = QLabel("No seleccionada")
         folder_layout.addWidget(self.input_folder_label, 0, 1)
         
         input_browse_btn = QPushButton("Explorar...")
-        input_browse_btn.clicked.connect(self.browse_input_folder)
+        input_browse_btn.clicked.connect(self.select_input_folder)
         folder_layout.addWidget(input_browse_btn, 0, 2)
         
+        # Botón para abrir carpeta de entrada
+        input_open_btn = QPushButton("Abrir")
+        input_open_btn.setIcon(self.style().standardIcon(QStyle.SP_DirOpenIcon))
+        input_open_btn.clicked.connect(self.open_input_folder)
+        folder_layout.addWidget(input_open_btn, 0, 3)
+        
         # Carpeta de salida
-        folder_layout.addWidget(QLabel("Carpeta de Salida:"), 1, 0)
-        self.output_folder_label = QLabel("")
-        self.output_folder_label.setStyleSheet("background-color: white; padding: 5px; border: 1px solid #ccc;")
+        folder_layout.addWidget(QLabel("Carpeta de salida:"), 1, 0)
+        self.output_folder_label = QLabel("No seleccionada")
         folder_layout.addWidget(self.output_folder_label, 1, 1)
         
         output_browse_btn = QPushButton("Explorar...")
         output_browse_btn.clicked.connect(self.browse_output_folder)
         folder_layout.addWidget(output_browse_btn, 1, 2)
         
-        # Grupo de opciones
+        # Botón para abrir carpeta de salida
+        output_open_btn = QPushButton("Abrir")
+        output_open_btn.setIcon(self.style().standardIcon(QStyle.SP_DirOpenIcon))
+        output_open_btn.clicked.connect(self.open_output_folder)
+        folder_layout.addWidget(output_open_btn, 1, 3)
+        
+        # Opciones de conversión
         options_group = QGroupBox("Opciones")
-        layout.addWidget(options_group)
+        right_layout.addWidget(options_group)
         
         options_layout = QVBoxLayout(options_group)
         
-        # Opciones con checkboxes
-        self.recursive_checkbox = QCheckBox("Buscar en subcarpetas")
+        # Búsqueda recursiva
+        self.recursive_checkbox = QCheckBox("Incluir subcarpetas (búsqueda recursiva)")
         self.recursive_checkbox.setChecked(True)
         self.recursive_checkbox.stateChanged.connect(self.on_recursive_changed)
         options_layout.addWidget(self.recursive_checkbox)
         
+        # Sobrescribir archivos existentes
         self.overwrite_checkbox = QCheckBox("Sobrescribir archivos existentes")
+        self.overwrite_checkbox.setChecked(False)
         options_layout.addWidget(self.overwrite_checkbox)
         
         # Formato de salida seleccionado (vista rápida)
@@ -478,45 +557,50 @@ class MP4ToWAVConverterApp(QMainWindow):
         format_layout.addWidget(self.output_format_combo)
         options_layout.addLayout(format_layout)
         
-        # Botón de escaneo
-        scan_btn = QPushButton("Escanear Archivos")
-        scan_btn.clicked.connect(self.scan_files)
-        options_layout.addWidget(scan_btn)
-        
-        # Grupo de botones de acción
+        # Botones de acción
         actions_layout = QHBoxLayout()
-        layout.addLayout(actions_layout)
+        right_layout.addLayout(actions_layout)
+        
+        self.scan_button = QPushButton("Escanear Carpeta")
+        self.scan_button.clicked.connect(self.scan_files)
+        actions_layout.addWidget(self.scan_button)
         
         self.start_button = QPushButton("Iniciar Conversión")
         self.start_button.clicked.connect(self.start_conversion)
+        self.start_button.setEnabled(False)
         actions_layout.addWidget(self.start_button)
         
-        self.stop_button = QPushButton("Detener Conversión")
+        self.stop_button = QPushButton("Detener")
         self.stop_button.clicked.connect(self.stop_conversion)
         self.stop_button.setEnabled(False)
         actions_layout.addWidget(self.stop_button)
         
         # Barra de progreso
-        progress_group = QGroupBox("Progreso")
-        layout.addWidget(progress_group)
-        
-        progress_layout = QVBoxLayout(progress_group)
-        
         self.progress_bar = QProgressBar()
-        progress_layout.addWidget(self.progress_bar)
+        self.progress_bar.setTextVisible(True)
+        self.progress_bar.setValue(0)
+        right_layout.addWidget(self.progress_bar)
         
-        # Área de registro
-        log_group = QGroupBox("Registro")
-        layout.addWidget(log_group, 1)  # 1 para que se expanda
+        # Registro de actividad
+        log_group = QGroupBox("Registro de actividad")
+        right_layout.addWidget(log_group)
         
         log_layout = QVBoxLayout(log_group)
         
         self.log_text = QTextEdit()
         self.log_text.setReadOnly(True)
+        self.log_text.setFont(QFont("Consolas", 9))
         log_layout.addWidget(self.log_text)
+        
+        # Añadir los paneles al splitter
+        splitter.addWidget(left_panel)
+        splitter.addWidget(right_panel)
+        
+        # Establecer tamaños iniciales del splitter
+        splitter.setSizes([300, 700])
     
-    def setup_filters_tab(self, tab):
-        """Configura la pestaña de filtros de formato"""
+    def setup_formats_tab(self, tab):
+        """Configura la pestaña de formatos"""
         layout = QVBoxLayout(tab)
         
         # Grupo de formatos
@@ -553,35 +637,6 @@ class MP4ToWAVConverterApp(QMainWindow):
         # Espaciador para empujar todo hacia arriba
         layout.addStretch()
     
-    def setup_folders_tab(self, tab):
-        """Configura la pestaña de selección de carpetas"""
-        layout = QVBoxLayout(tab)
-        
-        # Grupo de árbol de carpetas
-        tree_group = QGroupBox("Carpetas y subcarpetas con videos")
-        layout.addWidget(tree_group)
-        
-        tree_layout = QVBoxLayout(tree_group)
-        
-        # Árbol de carpetas
-        self.folder_tree = QTreeWidget()
-        self.folder_tree.setHeaderLabels(["Carpeta", "Ruta"])
-        self.folder_tree.setColumnWidth(0, 300)  # Ancho de la primera columna
-        self.folder_tree.itemChanged.connect(self.on_folder_item_changed)
-        tree_layout.addWidget(self.folder_tree)
-        
-        # Botones para seleccionar/deseleccionar carpetas
-        buttons_layout = QHBoxLayout()
-        layout.addLayout(buttons_layout)
-        
-        select_all_btn = QPushButton("Seleccionar Todas")
-        select_all_btn.clicked.connect(self.select_all_folders)
-        buttons_layout.addWidget(select_all_btn)
-        
-        deselect_all_btn = QPushButton("Deseleccionar Todas")
-        deselect_all_btn.clicked.connect(self.deselect_all_folders)
-        buttons_layout.addWidget(deselect_all_btn)
-    
     def setup_audio_tab(self, tab):
         """Configura la pestaña de configuración de audio"""
         layout = QVBoxLayout(tab)
@@ -609,10 +664,10 @@ class MP4ToWAVConverterApp(QMainWindow):
         self.format_radio_group.buttonClicked.connect(self.on_audio_format_changed)
         
         # Grupo de calidad de audio
-        quality_group = QGroupBox("Calidad de Audio")
-        layout.addWidget(quality_group)
+        self.quality_group = QGroupBox("Calidad de Audio")
+        layout.addWidget(self.quality_group)
         
-        quality_layout = QVBoxLayout(quality_group)
+        quality_layout = QVBoxLayout(self.quality_group)
         
         quality_layout.addWidget(QLabel("Seleccione el nivel de calidad:"))
         
@@ -639,18 +694,22 @@ class MP4ToWAVConverterApp(QMainWindow):
         info_layout = QVBoxLayout(info_group)
         
         info_text = QLabel(
-            "<b>WAV:</b> Sin compresión, calidad perfecta, archivos grandes. Ideal para edición.<br>"
-            "<b>MP3:</b> Compresión con pérdida, compatible con prácticamente todo.<br>"
-            "<b>OGG:</b> Formato libre, mejor calidad que MP3 a mismo tamaño.<br>"
-            "<b>FLAC:</b> Compresión sin pérdida, calidad perfecta, archivo más pequeño que WAV.<br>"
-            "<b>AAC:</b> Mejor calidad que MP3 a mismo bitrate. Usado en iTunes.<br>"
-            "<b>M4A:</b> Contenedor para AAC, usado en ecosistema Apple.<br>"
-            "<b>Opus:</b> Formato más nuevo, excelente calidad a bitrates bajos.<br>"
-            "<b>WMA:</b> Formato de Microsoft, buena compatibilidad en Windows."
+            "<b>WAV:</b> Sin compresión, calidad de CD (44.1kHz, estéreo). No utiliza compresión, por lo que no aplica el control de calidad.<br>"
+            "<b>WAV para transcripción de voz:</b> Optimizado para reconocimiento de voz (16kHz, mono). Ideal para servicios como Whisper, Google Speech, etc. Archivos más pequeños que WAV estándar.<br>"
+            "<b>MP3:</b> Compresión con pérdida, compatible con prácticamente todo. El control de calidad afecta al bitrate.<br>"
+            "<b>OGG:</b> Formato libre, mejor calidad que MP3 a mismo tamaño. El control de calidad afecta al nivel de compresión.<br>"
+            "<b>FLAC:</b> Compresión sin pérdida, calidad perfecta, archivo más pequeño que WAV. El control de calidad afecta solo al nivel de compresión, no a la calidad de audio.<br>"
+            "<b>AAC:</b> Mejor calidad que MP3 a mismo bitrate. Usado en iTunes. El control de calidad afecta al bitrate.<br>"
+            "<b>M4A:</b> Contenedor para AAC, usado en ecosistema Apple. El control de calidad afecta al bitrate.<br>"
+            "<b>Opus:</b> Formato más nuevo, excelente calidad a bitrates bajos. El control de calidad afecta al bitrate.<br>"
+            "<b>WMA:</b> Formato de Microsoft, buena compatibilidad en Windows. El control de calidad afecta al bitrate."
         )
         info_text.setTextFormat(Qt.RichText)
         info_text.setWordWrap(True)
         info_layout.addWidget(info_text)
+        
+        # Verificar estado inicial del slider de calidad
+        self.update_quality_slider_visibility()
         
         # Espaciador
         layout.addStretch()
@@ -659,14 +718,31 @@ class MP4ToWAVConverterApp(QMainWindow):
         """Actualiza el combobox cuando cambia el formato en la pestaña de audio"""
         index = self.format_radio_group.id(button)
         self.output_format_combo.setCurrentIndex(index)
+        
+        # Actualizar visibilidad del slider de calidad
+        self.update_quality_slider_visibility()
     
-    def browse_input_folder(self):
-        """Abre un diálogo para seleccionar la carpeta de entrada"""
+    def select_input_folder(self):
+        """Selecciona la carpeta de entrada"""
         folder = QFileDialog.getExistingDirectory(self, "Seleccionar Carpeta de Entrada")
         if folder:
             self.input_folder = folder
             self.input_folder_label.setText(folder)
-            self.log_message(f"Carpeta de entrada seleccionada: {folder}")
+            self.log_message(f"📁 Carpeta de entrada: {folder}")
+            
+            # Si no hay carpeta de salida, usar la misma
+            if not self.output_folder:
+                self.output_folder = folder
+                self.output_folder_label.setText(folder)
+                
+            # Limpiar el registro si hay demasiadas entradas
+            if self.log_text.document().lineCount() > 200:
+                self.log_text.clear()
+                self.log_message("🔄 Registro limpiado por rendimiento")
+                self.log_message(f"📁 Carpeta de entrada: {folder}")
+            
+            # Actualizar el árbol de carpetas y buscar archivos
+            self.scan_files()
     
     def browse_output_folder(self):
         """Abre un diálogo para seleccionar la carpeta de salida"""
@@ -674,7 +750,7 @@ class MP4ToWAVConverterApp(QMainWindow):
         if folder:
             self.output_folder = folder
             self.output_folder_label.setText(folder)
-            self.log_message(f"Carpeta de salida seleccionada: {folder}")
+            self.log_message(f"📁 Carpeta de salida: {folder}")
     
     def log_message(self, message):
         """Agrega un mensaje al área de registro"""
@@ -684,12 +760,12 @@ class MP4ToWAVConverterApp(QMainWindow):
         cursor.movePosition(QTextCursor.End)
         self.log_text.setTextCursor(cursor)
     
-    def on_recursive_changed(self):
+    def on_recursive_changed(self, state):
         """Maneja el cambio en la opción de búsqueda recursiva"""
-        if self.recursive_checkbox.isChecked():
-            self.log_message("Búsqueda recursiva activada. Use la pestaña 'Selección de Carpetas' para filtrar subcarpetas")
-        else:
-            self.log_message("Búsqueda recursiva desactivada. Solo se buscará en la carpeta principal")
+        if self.input_folder:
+            # Actualizar árbol según el nuevo estado
+            self.update_folder_tree()
+            self.scan_files()
     
     def select_all_formats(self, select):
         """Selecciona o deselecciona todos los formatos de video"""
@@ -702,161 +778,169 @@ class MP4ToWAVConverterApp(QMainWindow):
             self.log_message("Se han deseleccionado todos los formatos de video")
     
     def get_selected_formats(self):
-        """Obtiene la lista de formatos de video seleccionados"""
+        """Obtiene los formatos de video seleccionados"""
         return [fmt for fmt, checkbox in self.format_checkboxes.items() if checkbox.isChecked()]
     
-    def on_folder_item_changed(self, item, column):
-        """Maneja el cambio en un ítem del árbol de carpetas"""
-        # Solo procesar cambios en la primera columna (checkbox)
-        if column != 0:
-            return
-        
-        # Obtener el nuevo estado de selección
-        is_checked = item.checkState(0) == Qt.Checked
-        
-        # Propagar el cambio a todos los elementos hijos
-        self.apply_check_state_to_children(item, is_checked)
+    def on_tree_item_changed(self, item, column):
+        """Maneja el cambio de estado de selección de un elemento del árbol"""
+        if column == 0:
+            # Solo registrar cambios en elementos de archivo, no en carpetas
+            if item.data(0, Qt.UserRole) in self.file_items:
+                check_state = item.checkState(0)
+                if check_state == Qt.Checked:
+                    self.log_message(f"Seleccionado: {item.text(0)}")
+                elif check_state == Qt.Unchecked:
+                    self.log_message(f"Deseleccionado: {item.text(0)}")
     
-    def apply_check_state_to_children(self, parent_item, checked):
-        """Aplica el mismo estado a todos los hijos de un elemento"""
-        # Configurar el estado de los hijos
-        check_state = Qt.Checked if checked else Qt.Unchecked
-        
-        # Recorrer todos los hijos
-        for i in range(parent_item.childCount()):
-            child = parent_item.child(i)
-            child.setCheckState(0, check_state)
-            
-            # Aplicar recursivamente a los hijos de este hijo
-            self.apply_check_state_to_children(child, checked)
-    
-    def select_all_folders(self):
-        """Selecciona todas las carpetas en el árbol"""
+    def select_all_items(self):
+        """Selecciona todos los elementos del árbol"""
         root = self.folder_tree.invisibleRootItem()
         for i in range(root.childCount()):
             item = root.child(i)
             item.setCheckState(0, Qt.Checked)
+        self.log_message("Se han seleccionado todos los elementos")
         
-        self.log_message("Se han seleccionado todas las carpetas")
-    
-    def deselect_all_folders(self):
-        """Deselecciona todas las carpetas en el árbol"""
+    def deselect_all_items(self):
+        """Deselecciona todos los elementos del árbol"""
         root = self.folder_tree.invisibleRootItem()
         for i in range(root.childCount()):
             item = root.child(i)
             item.setCheckState(0, Qt.Unchecked)
-        
-        self.log_message("Se han deseleccionado todas las carpetas")
+        self.log_message("Se han deseleccionado todos los elementos")
     
-    def update_folder_tree(self, base_path):
-        """Actualiza el árbol de carpetas con la estructura de directorios"""
-        # Limpiar el árbol existente
+    def update_folder_tree(self):
+        """Actualiza el árbol de carpetas con la estructura de la carpeta seleccionada"""
         self.folder_tree.clear()
         self.folder_items = {}
+        self.file_items = {}
         
-        # Obtener el nombre de la carpeta base
-        base_name = os.path.basename(base_path)
-        
+        if not self.input_folder:
+            return
+            
         # Crear elemento raíz
+        root_path = self.input_folder
+        root_name = os.path.basename(root_path) or root_path
         root_item = QTreeWidgetItem(self.folder_tree)
-        root_item.setText(0, base_name)
-        root_item.setText(1, base_path)
+        root_item.setText(0, root_name)
+        root_item.setIcon(0, self.style().standardIcon(QStyle.SP_DirIcon))
+        root_item.setData(0, Qt.UserRole, root_path)
+        root_item.setFlags(root_item.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsAutoTristate)
         root_item.setCheckState(0, Qt.Checked)
         
-        # Guardar referencia al ítem
-        self.folder_items[base_path] = root_item
+        self.folder_items[root_path] = root_item
         
-        # Si la búsqueda recursiva está activa, añadir subcarpetas
+        # Si la búsqueda es recursiva, usar scan_subfolders que ya escanea la carpeta actual
         if self.recursive_checkbox.isChecked():
-            self.scan_subfolders(base_path, root_item)
-        
-        # Expandir el primer nivel
+            self.scan_subfolders(root_path, root_item)
+        else:
+            # Si no es recursiva, sólo escanear la carpeta raíz
+            self.scan_files_in_folder(root_path, root_item)
+            
+        # Expandir elemento raíz
         root_item.setExpanded(True)
     
     def scan_subfolders(self, parent_path, parent_item):
-        """Escanea subcarpetas y las añade al árbol"""
+        """Escanea las subcarpetas de forma recursiva"""
         try:
-            # Obtener todas las subcarpetas
+            # Primero agregar los archivos de la carpeta actual
+            self.scan_files_in_folder(parent_path, parent_item)
+            
+            # Luego procesar subcarpetas
             for entry in os.scandir(parent_path):
                 if entry.is_dir():
-                    # Crear elemento para esta subcarpeta
-                    folder_item = QTreeWidgetItem(parent_item)
-                    folder_item.setText(0, entry.name)
-                    folder_item.setText(1, entry.path)
-                    folder_item.setCheckState(0, Qt.Checked)
+                    child_path = entry.path
+                    child_name = os.path.basename(child_path)
                     
-                    # Guardar referencia al ítem
-                    self.folder_items[entry.path] = folder_item
+                    # Crear elemento hijo
+                    child_item = QTreeWidgetItem(parent_item)
+                    child_item.setText(0, child_name)
+                    child_item.setIcon(0, self.style().standardIcon(QStyle.SP_DirIcon))
+                    child_item.setData(0, Qt.UserRole, child_path)
+                    child_item.setFlags(child_item.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsAutoTristate)
+                    child_item.setCheckState(0, Qt.Checked)
                     
-                    # Escanear recursivamente
-                    self.scan_subfolders(entry.path, folder_item)
+                    self.folder_items[child_path] = child_item
+                    
+                    # Continuar escaneando de forma recursiva
+                    self.scan_subfolders(child_path, child_item)
         except Exception as e:
-            self.log_message(f"Error al escanear subcarpetas: {str(e)}")
+            self.log_message(f"⚠️ Error al escanear subcarpetas: {str(e)}")
     
-    def get_selected_folders(self):
-        """Obtiene la lista de carpetas seleccionadas en el árbol"""
-        selected_folders = []
+    def scan_files_in_folder(self, folder_path, parent_item):
+        """Escanea y agrega archivos de video a la carpeta especificada en el árbol"""
+        try:
+            # Obtener formatos de video seleccionados
+            selected_formats = self.get_selected_formats()
+            
+            # Escanear archivos en la carpeta
+            for entry in os.scandir(folder_path):
+                if entry.is_file():
+                    file_path = entry.path
+                    file_name = os.path.basename(file_path)
+                    ext = os.path.splitext(file_name)[1].lower()
+                    
+                    # Verificar si es un formato de video seleccionado
+                    if ext in selected_formats:
+                        # Crear elemento de archivo
+                        file_item = QTreeWidgetItem(parent_item)
+                        file_item.setText(0, file_name)
+                        file_item.setIcon(0, self.style().standardIcon(QStyle.SP_FileIcon))
+                        file_item.setData(0, Qt.UserRole, file_path)
+                        file_item.setFlags(file_item.flags() | Qt.ItemIsUserCheckable)
+                        file_item.setCheckState(0, Qt.Checked)
+                        
+                        # Guardar referencia al elemento de archivo
+                        self.file_items[file_path] = file_item
+        except Exception as e:
+            self.log_message(f"⚠️ Error al escanear archivos: {str(e)}")
+    
+    def get_selected_items(self):
+        """Obtiene las carpetas y archivos seleccionados en el árbol"""
+        result = {
+            'folders': [],
+            'files': []
+        }
         
-        # Si no hay elementos en el árbol, devolver lista vacía
-        if not self.folder_items:
-            return selected_folders
-        
-        # Recorrer todos los elementos del árbol
-        for path, item in self.folder_items.items():
+        # Recorrer elementos de carpeta
+        for folder_path, item in self.folder_items.items():
             if item.checkState(0) == Qt.Checked:
-                selected_folders.append(path)
+                result['folders'].append(folder_path)
         
-        return selected_folders
+        # Recorrer elementos de archivo
+        for file_path, item in self.file_items.items():
+            if item.checkState(0) == Qt.Checked:
+                result['files'].append(file_path)
+        
+        return result
     
     def scan_files(self):
-        """Escanea archivos de video en las carpetas seleccionadas"""
+        """Busca archivos de video en la carpeta de entrada"""
         if not self.input_folder:
-            QMessageBox.warning(self, "Advertencia", "Por favor, seleccione una carpeta de entrada")
-            return
-        
-        if not os.path.exists(self.input_folder):
-            QMessageBox.critical(self, "Error", f"La carpeta {self.input_folder} no existe")
-            return
-        
-        # Actualizar el árbol de carpetas
-        self.update_folder_tree(self.input_folder)
-        
-        # Buscar archivos de video y contar por carpeta
-        self.log_message(f"🔍 Escaneando {self.input_folder} en busca de archivos de video...")
-        selected_formats = self.get_selected_formats()
-        
-        if not selected_formats:
-            QMessageBox.warning(self, "Advertencia", "No hay formatos de video seleccionados para buscar")
             return
             
-        self.log_message(f"Formatos seleccionados: {', '.join(selected_formats)}")
+        # Obtener formatos seleccionados
+        selected_formats = self.get_selected_formats()
         
-        # Verificar recursividad
-        if self.recursive_checkbox.isChecked():
-            self.log_message("Buscando en todas las subcarpetas...")
-        else:
-            self.log_message("Buscando solo en la carpeta principal...")
-        
-        # Iniciar escaneo en un hilo para no bloquear la interfaz
-        self.scanner_thread = FolderScannerThread(self.input_folder, selected_formats, self.recursive_checkbox.isChecked())
-        self.scanner_thread.scan_complete.connect(self.show_scan_results)
-        self.scanner_thread.log_message.connect(self.log_message)
-        self.scanner_thread.start()
-    
-    def show_scan_results(self, folder_counts, total_files, folders_with_videos):
-        """Muestra los resultados del escaneo de archivos"""
-        self.log_message("\n=== Resultados del Escaneo ===")
-        self.log_message(f"Total de archivos de video encontrados: {total_files}")
-        self.log_message(f"Carpetas con videos: {folders_with_videos}")
-        
-        if folder_counts:
-            self.log_message("\nDistribución de archivos:")
-            for folder, count in folder_counts.items():
-                self.log_message(f"  • {folder}: {count} archivos")
-        else:
-            self.log_message("No se encontraron archivos de video en las carpetas seleccionadas")
-        
-        self.log_message("=== Fin del Escaneo ===\n")
+        try:
+            # Actualizar árbol de carpetas (esto ya escanea los archivos)
+            self.update_folder_tree()
+            
+            # Contar archivos usando las selecciones actuales
+            selected_items = self.get_selected_items()
+            total_files = len(selected_items['files'])
+            
+            # Mostrar resultados
+            if total_files > 0:
+                plural = "s" if total_files > 1 else ""
+                self.log_message(f"🔍 Se encontraron {total_files} archivo{plural} de video.")
+                self.start_button.setEnabled(True)
+            else:
+                self.log_message("⚠️ No se encontraron archivos de video.")
+                self.start_button.setEnabled(False)
+                
+        except Exception as e:
+            self.log_message(f"❌ Error al buscar archivos: {str(e)}")
+            self.start_button.setEnabled(False)
     
     def check_ffmpeg(self):
         """Verifica si ffmpeg está instalado en el sistema"""
@@ -888,11 +972,20 @@ class MP4ToWAVConverterApp(QMainWindow):
             QMessageBox.warning(self, "Advertencia", "No hay formatos de video seleccionados para convertir")
             return
         
-        # Obtener carpetas seleccionadas
-        selected_folders = self.get_selected_folders()
+        # Obtener elementos seleccionados
+        selected_items = self.get_selected_items()
+        
+        # Verificar si hay archivos o carpetas seleccionadas
+        if not selected_items['folders'] and not selected_items['files']:
+            QMessageBox.warning(self, "Advertencia", "No hay carpetas ni archivos seleccionados para convertir")
+            return
         
         # Obtener formato de audio seleccionado
         output_format = self.output_format_combo.currentData()
+        if not output_format:
+            # Si no hay formato seleccionado, usar WAV como predeterminado
+            output_format = 'wav'
+            self.log_message("⚠️ No se pudo obtener el formato de salida, usando WAV por defecto")
         
         # Obtener nivel de calidad
         audio_quality = self.quality_slider.value()
@@ -909,7 +1002,7 @@ class MP4ToWAVConverterApp(QMainWindow):
         self.worker_thread = FFmpegWorker(
             self.input_folder, 
             self.output_folder, 
-            selected_folders, 
+            selected_items, 
             selected_formats, 
             self.recursive_checkbox.isChecked(), 
             self.overwrite_checkbox.isChecked(),
@@ -927,26 +1020,100 @@ class MP4ToWAVConverterApp(QMainWindow):
     
     def stop_conversion(self):
         """Detiene el proceso de conversión"""
-        if self.conversion_running and self.worker_thread:
-            self.worker_thread.stop()
-            self.log_message("⚠️ Solicitando detener la conversión...")
+        if self.worker_thread and self.worker_thread.isRunning():
+            self.worker_thread.stop_requested = True
+            self.log_message("⏹️ Deteniendo el proceso de conversión...")
             self.stop_button.setEnabled(False)
     
     def update_progress(self, current, total):
         """Actualiza la barra de progreso"""
-        percent = int((current / total) * 100)
-        self.progress_bar.setValue(percent)
+        self.progress_bar.setMaximum(total)
+        self.progress_bar.setValue(current)
+        self.progress_bar.setFormat(f"{current}/{total} ({int(current/total*100)}%)")
     
     def conversion_finished(self):
-        """Maneja el final del proceso de conversión"""
+        """Maneja el evento de finalización de la conversión"""
         self.conversion_running = False
         self.start_button.setEnabled(True)
         self.stop_button.setEnabled(False)
+        self.progress_bar.setValue(self.progress_bar.maximum())
+        
+        # Reproducir sonido de notificación si está disponible
+        try:
+            QApplication.beep()
+        except:
+            pass
+            
+        self.log_message("✅ Proceso de conversión finalizado")
+        
+        # Preguntar si quiere abrir la carpeta de salida
+        if self.output_folder and os.path.exists(self.output_folder):
+            reply = QMessageBox.question(
+                self, 
+                "Conversión Completada", 
+                "El proceso de conversión ha finalizado. ¿Desea abrir la carpeta de salida?",
+                QMessageBox.Yes | QMessageBox.No, 
+                QMessageBox.Yes
+            )
+            
+            if reply == QMessageBox.Yes:
+                self.open_output_folder()
+        else:
+            QMessageBox.information(self, "Conversión Completada", "El proceso de conversión ha finalizado.")
+
+    def on_output_format_changed(self, index):
+        """Actualiza los radio buttons cuando cambia el formato en el combobox"""
+        if hasattr(self, 'format_radio_group'):
+            button = self.format_radio_group.button(index)
+            if button:
+                button.setChecked(True)
+                
+        # Actualizar visibilidad del slider de calidad
+        self.update_quality_slider_visibility()
+
+    def update_quality_slider_visibility(self):
+        """Actualiza la visibilidad del slider de calidad según el formato seleccionado"""
+        if hasattr(self, 'quality_group') and hasattr(self, 'output_format_combo'):
+            current_format = self.output_format_combo.currentData()
+            
+            # Ocultar slider para formatos donde no aplica
+            if current_format in ['wav', 'wav_voice']:
+                self.quality_group.setVisible(False)
+            else:
+                self.quality_group.setVisible(True)
+
+    def open_input_folder(self):
+        """Abre la carpeta de entrada en el explorador de archivos"""
+        if self.input_folder and os.path.exists(self.input_folder):
+            self.open_folder_in_explorer(self.input_folder)
+        else:
+            QMessageBox.warning(self, "Advertencia", "No hay carpeta de entrada seleccionada o no existe")
+
+    def open_output_folder(self):
+        """Abre la carpeta de salida en el explorador de archivos"""
+        if self.output_folder and os.path.exists(self.output_folder):
+            self.open_folder_in_explorer(self.output_folder)
+        else:
+            QMessageBox.warning(self, "Advertencia", "No hay carpeta de salida seleccionada o no existe")
+
+    def open_folder_in_explorer(self, folder_path):
+        """Abre una carpeta en el explorador de archivos del sistema"""
+        try:
+            if sys.platform == 'win32':
+                os.startfile(folder_path)
+            elif sys.platform == 'darwin':  # macOS
+                subprocess.run(['open', folder_path])
+            else:  # Linux y otros
+                subprocess.run(['xdg-open', folder_path])
+            self.log_message(f"📂 Abriendo carpeta: {folder_path}")
+        except Exception as e:
+            self.log_message(f"❌ Error al abrir la carpeta: {str(e)}")
+            QMessageBox.warning(self, "Error", f"No se pudo abrir la carpeta: {str(e)}")
 
 
 def main():
     app = QApplication(sys.argv)
-    window = MP4ToWAVConverterApp()
+    window = VidToWav()
     window.show()
     sys.exit(app.exec_())
 
